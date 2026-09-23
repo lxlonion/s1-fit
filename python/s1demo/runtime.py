@@ -5,7 +5,7 @@ import json
 
 import pandas as pd
 
-from .monotonic_zigzag import generate_removed_restricted_candidates
+from .monotonic_zigzag import replay_removed_restricted_candidates
 from .zigzag_signals import ZigZagSignalConfig, generate_zigzag_signals
 
 
@@ -95,8 +95,9 @@ def calculate(payload: dict[str, object]) -> dict[str, object]:
                     "direction": direction,
                 }
             )
+    removed_candidates, removal_events = replay_removed_restricted_candidates(frame)
     removed_markers = []
-    for candidate in generate_removed_restricted_candidates(frame):
+    for candidate in removed_candidates:
         day = pd.Timestamp(frame.iloc[candidate.marker]["date"]).date().isoformat()
         removed_markers.append(
             {
@@ -108,10 +109,23 @@ def calculate(payload: dict[str, object]) -> dict[str, object]:
                 "kind": f"removed_{candidate.side.lower()}",
             }
         )
+    event_rows = []
+    for event in removal_events:
+        origin = frame.iloc[event.marker]
+        removed = frame.iloc[event.removed]
+        event_rows.append(
+            {
+                "originTime": pd.Timestamp(origin["date"]).date().isoformat(),
+                "removedTime": pd.Timestamp(removed["date"]).date().isoformat(),
+                "side": event.side,
+                "originPrice": float(origin["low"] if event.side == "B" else origin["high"]),
+            }
+        )
     return {
         "bars": bars,
         "markers": markers,
         "removedMarkers": removed_markers,
+        "removalEvents": event_rows,
         "numbers": numbers,
         "formulaProfile": "restricted-formula",
     }

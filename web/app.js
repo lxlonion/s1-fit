@@ -9,11 +9,16 @@ const showSignals = document.querySelector('#show-signals');
 const showRemoved = document.querySelector('#show-removed');
 const showNumbers = document.querySelector('#show-numbers');
 const chartNode = document.querySelector('#chart');
+const removalHistory = document.querySelector('#removal-history');
+const removalHistoryBody = document.querySelector('#removal-history-body');
 
 let pyodide;
 let manifest;
 let chart;
 let resizeObserver;
+let removalOverlay;
+let removalOverlayFrame;
+let removalRangeHandler;
 let currentResult;
 let currentFullResult;
 let currentCalculationKey;
@@ -291,15 +296,98 @@ function visibleResult(result) {
     bars: visible(result.bars),
     markers: visible(result.markers),
     removedMarkers: visible(result.removedMarkers || []),
+    removalEvents: (result.removalEvents || []).filter(event => event.removedTime >= startDate),
     numbers: visible(result.numbers),
     formulaProfile: result.formulaProfile,
   };
 }
 
+function addRemovalElement(tag, attributes, label) {
+  const element = document.createElementNS('http://www.w3.org/2000/svg', tag);
+  for (const [name, value] of Object.entries(attributes)) element.setAttribute(name, String(value));
+  if (label) element.textContent = label;
+  removalOverlay.append(element);
+}
+
+function renderRemovalHistory() {
+  const events = showRemoved.checked ? currentResult.removalEvents : [];
+  removalHistory.hidden = events.length === 0;
+  removalHistoryBody.replaceChildren(...[...events]
+    .sort((left, right) => left.removedTime.localeCompare(right.removedTime))
+    .map(event => {
+      const row = document.createElement('tr');
+      for (const value of [`${event.side}× ${event.originTime}`, '---> X', event.removedTime]) {
+        const cell = document.createElement('td');
+        cell.textContent = value;
+        row.append(cell);
+      }
+      return row;
+    }));
+}
+
+function drawRemovalEvents(candles) {
+  if (!removalOverlay || !showRemoved.checked) return;
+  removalOverlay.replaceChildren();
+  const width = chartNode.clientWidth;
+  const height = chartNode.clientHeight;
+  const paneHeight = height - chart.timeScale().height();
+  removalOverlay.setAttribute('viewBox', `0 0 ${width} ${height}`);
+  const timeScale = chart.timeScale();
+  for (const event of currentResult.removalEvents) {
+    const removedX = timeScale.timeToCoordinate(event.removedTime);
+    if (!Number.isFinite(removedX) || removedX < 0 || removedX > width) continue;
+    const originX = timeScale.timeToCoordinate(event.originTime);
+    const hasOrigin = Number.isFinite(originX);
+    const priceY = candles.priceToCoordinate(event.originPrice);
+    const suggestedY = Number.isFinite(priceY)
+      ? priceY + (event.side === 'B' ? 23 : -23)
+      : (event.side === 'B' ? paneHeight - 20 : 20);
+    const y = Math.max(16, Math.min(paneHeight - 16, suggestedY));
+    const lineStart = hasOrigin ? originX + 13 : 4;
+    const lineEnd = removedX - 10;
+
+    if (hasOrigin && originX >= 0 && originX <= width && removedX - originX >= 25) {
+      addRemovalElement('text', {
+        x: originX, y: y + 5, fill: '#78909c',
+        'font-size': 11, 'font-weight': 600, 'text-anchor': 'middle',
+      }, `${event.side}×`);
+    }
+    if (lineEnd - lineStart >= 7) {
+      addRemovalElement('line', {
+        x1: lineStart, y1: y, x2: lineEnd, y2: y,
+        stroke: '#90a4ae', 'stroke-width': 1.5, 'stroke-dasharray': '4 3',
+      });
+      addRemovalElement('path', {
+        d: `M ${lineEnd - 5} ${y - 4} L ${lineEnd} ${y} L ${lineEnd - 5} ${y + 4}`,
+        fill: 'none', stroke: '#90a4ae', 'stroke-width': 1.5,
+      });
+    }
+    addRemovalElement('text', {
+      x: removedX, y: y + 5, fill: '#607d8b',
+      'font-size': 14, 'font-weight': 700, 'text-anchor': 'middle',
+    }, 'X');
+  }
+}
+
+function scheduleRemovalEvents(candles) {
+  if (!removalOverlay) return;
+  if (removalOverlayFrame) cancelAnimationFrame(removalOverlayFrame);
+  removalOverlayFrame = requestAnimationFrame(() => {
+    removalOverlayFrame = null;
+    drawRemovalEvents(candles);
+  });
+}
+
 function render() {
   if (!currentResult) return;
+  renderRemovalHistory();
+  if (removalOverlayFrame) cancelAnimationFrame(removalOverlayFrame);
   if (resizeObserver) resizeObserver.disconnect();
+  if (chart && removalRangeHandler) chart.timeScale().unsubscribeVisibleLogicalRangeChange(removalRangeHandler);
   if (chart) chart.remove();
+  if (removalOverlay) removalOverlay.remove();
+  removalOverlay = null;
+  removalRangeHandler = null;
   chart = LightweightCharts.createChart(chartNode, {
     width: chartNode.clientWidth,
     height: chartNode.clientHeight,
@@ -316,17 +404,27 @@ function render() {
   candles.setData(currentResult.bars);
   const markers = [];
   if (showSignals.checked) markers.push(...currentResult.markers);
-  if (showRemoved.checked) markers.push(...currentResult.removedMarkers);
+  if (showRemoved.checked && !currentResult.removalEvents.length) markers.push(...currentResult.removedMarkers);
   if (showNumbers.checked) markers.push(...currentResult.numbers);
   markers.sort((a, b) => a.time.localeCompare(b.time) || a.text.localeCompare(b.text));
   candles.setMarkers(markers);
   chart.timeScale().fitContent();
+  if (showRemoved.checked && currentResult.removalEvents.length) {
+    removalOverlay = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    removalOverlay.classList.add('removal-overlay');
+    removalOverlay.setAttribute('aria-label', '灰色横线从原 B/S 候选日指向消失日 X');
+    chartNode.append(removalOverlay);
+    removalRangeHandler = () => scheduleRemovalEvents(candles);
+    chart.timeScale().subscribeVisibleLogicalRangeChange(removalRangeHandler);
+    scheduleRemovalEvents(candles);
+  }
   resizeObserver = new ResizeObserver(([entry]) => {
     chart.applyOptions({
       width: entry.contentRect.width,
       height: entry.contentRect.height,
     });
     chart.timeScale().fitContent();
+    scheduleRemovalEvents(candles);
   });
   resizeObserver.observe(chartNode);
 }

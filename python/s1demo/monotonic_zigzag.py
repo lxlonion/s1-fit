@@ -25,6 +25,15 @@ class RestrictedCandidateConfig:
     bearish_spike_return_min: float = 0.15
 
 
+@dataclass(frozen=True)
+class RestrictedRemovalEvent:
+    """First cutoff at which a previously visible B/S candidate disappears."""
+
+    marker: int
+    removed: int
+    side: str
+
+
 def generate_monotonic_candidates(
     frame: pd.DataFrame,
     buy_threshold: float = 0.08,
@@ -153,31 +162,49 @@ def generate_removed_restricted_candidates(
     minimum_history: int = 3,
 ) -> list[MonotonicCandidate]:
     """Replay historical cutoffs and return B/S markers later withdrawn."""
+    removed, _ = replay_removed_restricted_candidates(
+        frame,
+        buy_threshold=buy_threshold,
+        sell_threshold=sell_threshold,
+        minimum_history=minimum_history,
+    )
+    return removed
+
+
+def replay_removed_restricted_candidates(
+    frame: pd.DataFrame,
+    buy_threshold: float = 0.08,
+    sell_threshold: float = 0.10,
+    minimum_history: int = 3,
+) -> tuple[list[MonotonicCandidate], list[RestrictedRemovalEvent]]:
+    """Return final withdrawals and the first day each marker disappeared."""
     seen: dict[tuple[int, str], MonotonicCandidate] = {}
+    first_removed_at: dict[tuple[int, str], int] = {}
+    previous_active: set[tuple[int, str]] = set()
     for stop in range(minimum_history + 1, len(frame) + 1):
         prefix = frame.iloc[:stop]
-        for candidate in generate_restricted_monotonic_candidates(
+        current_candidates = generate_restricted_monotonic_candidates(
             prefix,
             buy_threshold=buy_threshold,
             sell_threshold=sell_threshold,
             minimum_history=minimum_history,
-        ):
-            seen.setdefault((candidate.marker, candidate.side), candidate)
-
-    active = {
-        (candidate.marker, candidate.side)
-        for candidate in generate_restricted_monotonic_candidates(
-            frame,
-            buy_threshold=buy_threshold,
-            sell_threshold=sell_threshold,
-            minimum_history=minimum_history,
         )
-    }
-    return [
-        candidate
-        for key, candidate in sorted(seen.items())
-        if key not in active
-    ]
+        current_active = set()
+        for candidate in current_candidates:
+            current_active.add((candidate.marker, candidate.side))
+            seen.setdefault((candidate.marker, candidate.side), candidate)
+        for key in previous_active - current_active:
+            first_removed_at.setdefault(key, stop - 1)
+        previous_active = current_active
+
+    withdrawn_keys = [key for key in sorted(seen) if key not in previous_active]
+    return (
+        [seen[key] for key in withdrawn_keys],
+        [
+            RestrictedRemovalEvent(key[0], first_removed_at[key], key[1])
+            for key in withdrawn_keys
+        ],
+    )
 
 
 def _reject_restricted_buy(
