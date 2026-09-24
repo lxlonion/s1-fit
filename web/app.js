@@ -1,3 +1,5 @@
+import { markerBounds, layoutRemovalEvents } from './removal-layout.mjs';
+
 const statusNode = document.querySelector('#status');
 const runButton = document.querySelector('#run');
 const loadLatestButton = document.querySelector('#load-latest');
@@ -18,7 +20,8 @@ let chart;
 let resizeObserver;
 let removalOverlay;
 let removalOverlayFrame;
-let removalRangeHandler;
+let removalMarkerSignature;
+const removalMeasure = document.createElement('canvas').getContext('2d');
 let currentResult;
 let currentFullResult;
 let currentCalculationKey;
@@ -316,7 +319,7 @@ function renderRemovalHistory() {
     .sort((left, right) => left.removedTime.localeCompare(right.removedTime))
     .map(event => {
       const row = document.createElement('tr');
-      for (const value of [`${event.side}× ${event.originTime}`, '---> X', event.removedTime]) {
+      for (const value of [`${event.side} ${event.originTime}`, '---> x', event.removedTime]) {
         const cell = document.createElement('td');
         cell.textContent = value;
         row.append(cell);
@@ -325,56 +328,76 @@ function renderRemovalHistory() {
     }));
 }
 
-function drawRemovalEvents(candles) {
+function drawRemovalEvents(candles, markers) {
   if (!removalOverlay || !showRemoved.checked) return;
-  removalOverlay.replaceChildren();
-  const width = chartNode.clientWidth;
-  const height = chartNode.clientHeight;
-  const paneHeight = height - chart.timeScale().height();
-  removalOverlay.setAttribute('viewBox', `0 0 ${width} ${height}`);
   const timeScale = chart.timeScale();
-  for (const event of currentResult.removalEvents) {
-    const removedX = timeScale.timeToCoordinate(event.removedTime);
-    if (!Number.isFinite(removedX) || removedX < 0 || removedX > width) continue;
-    const originX = timeScale.timeToCoordinate(event.originTime);
-    const hasOrigin = Number.isFinite(originX);
-    const priceY = candles.priceToCoordinate(event.originPrice);
-    const suggestedY = Number.isFinite(priceY)
-      ? priceY + (event.side === 'B' ? 23 : -23)
-      : (event.side === 'B' ? paneHeight - 20 : 20);
-    const y = Math.max(16, Math.min(paneHeight - 16, suggestedY));
-    const lineStart = hasOrigin ? originX + 13 : 4;
-    const lineEnd = removedX - 10;
-
-    if (hasOrigin && originX >= 0 && originX <= width && removedX - originX >= 25) {
-      addRemovalElement('text', {
-        x: originX, y: y + 5, fill: '#78909c',
-        'font-size': 11, 'font-weight': 600, 'text-anchor': 'middle',
-      }, `${event.side}×`);
-    }
-    if (lineEnd - lineStart >= 7) {
-      addRemovalElement('line', {
-        x1: lineStart, y1: y, x2: lineEnd, y2: y,
-        stroke: '#90a4ae', 'stroke-width': 1.5, 'stroke-dasharray': '4 3',
-      });
-      addRemovalElement('path', {
-        d: `M ${lineEnd - 5} ${y - 4} L ${lineEnd} ${y} L ${lineEnd - 5} ${y + 4}`,
-        fill: 'none', stroke: '#90a4ae', 'stroke-width': 1.5,
-      });
-    }
+  const width = timeScale.width();
+  const paneHeight = chartNode.clientHeight - timeScale.height();
+  const { fontSize, fontFamily } = chart.options().layout;
+  const spacing = timeScale.options().barSpacing;
+  removalMeasure.font = `${fontSize}px ${fontFamily}`;
+  const bars = new Map(currentResult.bars.flatMap(bar => {
+    const x = timeScale.timeToCoordinate(bar.time);
+    const top = candles.priceToCoordinate(bar.high);
+    const bottom = candles.priceToCoordinate(bar.low);
+    return [x, top, bottom].every(Number.isFinite)
+      ? [[bar.time, { x, top, bottom, left: x - spacing / 2, right: x + spacing / 2 }]] : [];
+  }));
+  const bounds = markerBounds(markers, bars, spacing, fontSize, text => removalMeasure.measureText(text).width);
+  const byId = new Map(bounds.filter(box => box.id).map(box => [box.id, box]));
+  const events = currentResult.removalEvents.map(event => ({
+    ...event,
+    id: removalId(event),
+    originX: timeScale.timeToCoordinate(event.originTime),
+    removedX: timeScale.timeToCoordinate(event.removedTime),
+    textY: byId.get(removalId(event))?.textY,
+  }));
+  const expanded = layoutRemovalEvents(events, [...bars.values(), ...bounds], width, paneHeight, fontSize);
+  const expandedIds = new Set(expanded.map(event => event.id));
+  const signature = [...expandedIds].join('|');
+  if (signature !== removalMarkerSignature) {
+    removalMarkerSignature = signature;
+    // Transparent expanded placeholders keep the native stack and autoscale
+    // stable; compact Bx/Sx markers use precisely the ordinary B/S layout.
+    candles.setMarkers(markers.map(marker => expandedIds.has(marker.id)
+      ? { ...marker, color: 'transparent' } : marker));
+  }
+  removalOverlay.replaceChildren();
+  removalOverlay.setAttribute('viewBox', `0 0 ${chartNode.clientWidth} ${chartNode.clientHeight}`);
+  removalOverlay.style.fontFamily = fontFamily;
+  for (const event of expanded) {
+    const { originX, removedX, y, side } = event;
+    const lineStart = originX + 10;
+    const lineEnd = removedX - 9;
     addRemovalElement('text', {
-      x: removedX, y: y + 5, fill: '#607d8b',
-      'font-size': 14, 'font-weight': 700, 'text-anchor': 'middle',
-    }, 'X');
+      x: originX, y, fill: '#78909c', 'font-size': fontSize,
+      'text-anchor': 'middle', 'dominant-baseline': 'central',
+    }, side);
+    addRemovalElement('line', {
+      x1: lineStart, y1: y, x2: lineEnd, y2: y,
+      stroke: '#90a4ae', 'stroke-width': 1.5, 'stroke-dasharray': '4 3',
+    });
+    addRemovalElement('path', {
+      d: `M ${lineEnd - 5} ${y - 4} L ${lineEnd} ${y} L ${lineEnd - 5} ${y + 4}`,
+      fill: 'none', stroke: '#90a4ae', 'stroke-width': 1.5,
+    });
+    addRemovalElement('text', {
+      x: removedX, y, fill: '#78909c', 'font-size': fontSize,
+      'text-anchor': 'middle', 'dominant-baseline': 'central',
+    }, 'x');
   }
 }
 
-function scheduleRemovalEvents(candles) {
+function removalId(event) {
+  return `removal:${event.originTime}:${event.side}`;
+}
+
+function scheduleRemovalEvents(candles, markers) {
   if (!removalOverlay) return;
   if (removalOverlayFrame) cancelAnimationFrame(removalOverlayFrame);
   removalOverlayFrame = requestAnimationFrame(() => {
     removalOverlayFrame = null;
-    drawRemovalEvents(candles);
+    drawRemovalEvents(candles, markers);
   });
 }
 
@@ -383,11 +406,10 @@ function render() {
   renderRemovalHistory();
   if (removalOverlayFrame) cancelAnimationFrame(removalOverlayFrame);
   if (resizeObserver) resizeObserver.disconnect();
-  if (chart && removalRangeHandler) chart.timeScale().unsubscribeVisibleLogicalRangeChange(removalRangeHandler);
   if (chart) chart.remove();
   if (removalOverlay) removalOverlay.remove();
   removalOverlay = null;
-  removalRangeHandler = null;
+  removalMarkerSignature = null;
   chart = LightweightCharts.createChart(chartNode, {
     width: chartNode.clientWidth,
     height: chartNode.clientHeight,
@@ -404,7 +426,18 @@ function render() {
   candles.setData(currentResult.bars);
   const markers = [];
   if (showSignals.checked) markers.push(...currentResult.markers);
-  if (showRemoved.checked && !currentResult.removalEvents.length) markers.push(...currentResult.removedMarkers);
+  if (showRemoved.checked) {
+    if (currentResult.removalEvents.length) {
+      markers.push(...currentResult.removalEvents.map(event => ({
+        id: removalId(event), time: event.removedTime,
+        position: event.side === 'B' ? 'belowBar' : 'aboveBar',
+        shape: event.side === 'B' ? 'arrowUp' : 'arrowDown',
+        color: '#78909c', text: `${event.side}x`,
+      })));
+    } else {
+      markers.push(...currentResult.removedMarkers.map(marker => ({ ...marker, text: `${marker.text[0]}x` })));
+    }
+  }
   if (showNumbers.checked) markers.push(...currentResult.numbers);
   markers.sort((a, b) => a.time.localeCompare(b.time) || a.text.localeCompare(b.text));
   candles.setMarkers(markers);
@@ -412,11 +445,12 @@ function render() {
   if (showRemoved.checked && currentResult.removalEvents.length) {
     removalOverlay = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     removalOverlay.classList.add('removal-overlay');
-    removalOverlay.setAttribute('aria-label', '灰色横线从原 B/S 候选日指向消失日 X');
+    removalOverlay.setAttribute('aria-label', '灰色 B 或 S 横线指向消失日 x；空间不足时显示 Bx 或 Sx');
     chartNode.append(removalOverlay);
-    removalRangeHandler = () => scheduleRemovalEvents(candles);
-    chart.timeScale().subscribeVisibleLogicalRangeChange(removalRangeHandler);
-    scheduleRemovalEvents(candles);
+    candles.attachPrimitive({
+      updateAllViews: () => scheduleRemovalEvents(candles, markers),
+    });
+    scheduleRemovalEvents(candles, markers);
   }
   resizeObserver = new ResizeObserver(([entry]) => {
     chart.applyOptions({
@@ -424,7 +458,7 @@ function render() {
       height: entry.contentRect.height,
     });
     chart.timeScale().fitContent();
-    scheduleRemovalEvents(candles);
+    scheduleRemovalEvents(candles, markers);
   });
   resizeObserver.observe(chartNode);
 }
