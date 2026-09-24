@@ -428,8 +428,9 @@ function render() {
   if (showSignals.checked) markers.push(...currentResult.markers);
   if (showRemoved.checked) {
     if (currentResult.removalEvents.length) {
-      markers.push(...currentResult.removalEvents.map(event => ({
-        id: removalId(event), time: event.removedTime,
+      const barTimes = new Set(currentResult.bars.map(bar => bar.time));
+      markers.push(...currentResult.removalEvents.filter(event => barTimes.has(event.originTime)).map(event => ({
+        id: removalId(event), time: event.originTime,
         position: event.side === 'B' ? 'belowBar' : 'aboveBar',
         shape: event.side === 'B' ? 'arrowUp' : 'arrowDown',
         color: '#78909c', text: `${event.side}x`,
@@ -445,7 +446,7 @@ function render() {
   if (showRemoved.checked && currentResult.removalEvents.length) {
     removalOverlay = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
     removalOverlay.classList.add('removal-overlay');
-    removalOverlay.setAttribute('aria-label', '灰色 B 或 S 横线指向消失日 x；空间不足时显示 Bx 或 Sx');
+    removalOverlay.setAttribute('aria-label', '灰色 B 或 S 横线指向消失日 x；空间不足时在原信号出现日显示 Bx 或 Sx');
     chartNode.append(removalOverlay);
     candles.attachPrimitive({
       updateAllViews: () => scheduleRemovalEvents(candles, markers),

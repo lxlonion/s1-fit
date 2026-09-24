@@ -35,7 +35,7 @@ export function layoutRemovalEvents(events, obstacles, width, height, fontSize) 
   for (const event of events) {
     const { originX, removedX, textY, side, id } = event;
     // Both labels and a recognizable arrow must fit between the two dates.
-    // Otherwise leave the native Bx/Sx marker on the disappearance date.
+    // Otherwise leave the native Bx/Sx marker on the original signal date.
     if (![originX, removedX, textY].every(Number.isFinite)
       || originX < 10 || removedX > width - 10 || removedX - originX < 48) continue;
     const left = originX - fontSize;
